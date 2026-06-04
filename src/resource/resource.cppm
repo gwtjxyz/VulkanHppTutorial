@@ -233,6 +233,7 @@ public:
         return m_ImageView;
     }
 
+    // TODO some kind of global sampler?
     [[nodiscard]] vk::Sampler getSampler() const {
         return m_Sampler;
     }
@@ -269,13 +270,12 @@ private:
     }
 
     void createVulkanImage(StbImageWrapper & data) {
-        const auto imageData = Locator::getVulkanResourceService()->createTexture(data);
+        const auto imageData = Locator::getVulkanResourceService()->createSampledImageTexture(data);
 
         m_Image = imageData.image;
         m_DeviceMemory = imageData.imageMemory;
         m_Offset = 0; // TODO: change when we start supporting different offsets
         m_ImageView = imageData.imageView;
-        m_Sampler = imageData.sampler;
     }
 
 private:

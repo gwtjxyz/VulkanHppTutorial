@@ -263,19 +263,23 @@ private:
         if (isImguiCapturingKeyboard())
             return;
 
+        bool sprinting = false;
+        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+            sprinting = true;
+
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-            camera.processKeyboard(CameraMovement::FORWARD, deltaTime);
+            camera.processKeyboard(CameraMovement::FORWARD, deltaTime, sprinting);
         if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-            camera.processKeyboard(CameraMovement::BACKWARD, deltaTime);
+            camera.processKeyboard(CameraMovement::BACKWARD, deltaTime, sprinting);
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-            camera.processKeyboard(CameraMovement::LEFT, deltaTime);
+            camera.processKeyboard(CameraMovement::LEFT, deltaTime, sprinting);
         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-            camera.processKeyboard(CameraMovement::RIGHT, deltaTime);
+            camera.processKeyboard(CameraMovement::RIGHT, deltaTime, sprinting);
 
         if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
-            camera.processKeyboard(CameraMovement::UP, deltaTime);
+            camera.processKeyboard(CameraMovement::UP, deltaTime, sprinting);
         if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
-            camera.processKeyboard(CameraMovement::DOWN, deltaTime);
+            camera.processKeyboard(CameraMovement::DOWN, deltaTime, sprinting);
 
         if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
             glfwSetWindowShouldClose(window, true);
@@ -297,6 +301,7 @@ private:
 
         m_VulkanResourceService->freeResources(m_DepthImage, m_DepthImageMemory, m_DepthImageView);
         m_VulkanResourceService->freeResources(m_ColorImage, m_ColorImageMemory, m_ColorImageView);
+        m_VulkanResourceService->freeResources(m_TextureSampler);
 
         for (const auto & shaderDataBuffer : m_ShaderDataBuffers) {
             deviceHandle.unmapMemory(shaderDataBuffer.bufferMemory);
@@ -404,7 +409,10 @@ private:
             };
 
             m_GraphicsQueue.submit(graphicsSubmitInfo, nullptr);
+        }
 
+        // Present
+        {
             // Present the image (wait for graphics to finish)
             vk::SemaphoreWaitInfo waitInfo = {
                 .semaphoreCount = 1,
@@ -434,6 +442,7 @@ private:
                 assert(result == vk::Result::eSuccess);
             }
         }
+
 
         m_FrameIndex = (m_FrameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
     }
@@ -980,24 +989,35 @@ private:
     }
 
     // We are only using this for textures
+    // TODO also use this for other global buffers we could index into?
     void createDescriptorSetLayout() {
         std::array bindings = {
             vk::DescriptorSetLayoutBinding(
                 0,
-                vk::DescriptorType::eCombinedImageSampler,
+                vk::DescriptorType::eSampler,
+                1,
+                vk::ShaderStageFlagBits::eFragment,
+                nullptr
+            ),
+            vk::DescriptorSetLayoutBinding(
+                1,
+                vk::DescriptorType::eSampledImage,
                 m_ResourceManager.getResourceTypeCount<Texture>(),
                 vk::ShaderStageFlagBits::eFragment,
                 nullptr
             )
         };
 
-        vk::DescriptorBindingFlags descriptorBindingFlags = {
-            vk::DescriptorBindingFlagBits::eVariableDescriptorCount
+        std::array bindingFlags = {
+            vk::DescriptorBindingFlags {},
+            vk::DescriptorBindingFlags {
+                vk::DescriptorBindingFlagBits::eVariableDescriptorCount
+            }
         };
 
         vk::DescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo = {
-            .bindingCount = 1,
-            .pBindingFlags = &descriptorBindingFlags,
+            .bindingCount = bindingFlags.size(),
+            .pBindingFlags = bindingFlags.data(),
         };
 
         vk::DescriptorSetLayoutCreateInfo layoutInfo = {
@@ -1383,7 +1403,11 @@ private:
         // Size is important because trying to allocate descriptors beyond the requested count will fail
         std::array poolSize = {
             vk::DescriptorPoolSize(
-                vk::DescriptorType::eCombinedImageSampler,
+                vk::DescriptorType::eSampler,
+                1
+            ),
+            vk::DescriptorPoolSize(
+                vk::DescriptorType::eSampledImage,
                 m_ResourceManager.getResourceTypeCount<Texture>()
             ),
         };
@@ -1422,7 +1446,6 @@ private:
         std::vector<vk::DescriptorImageInfo> textureDescriptors {};
         for (auto i = 0; i < variableDescCount; ++i) {
             vk::DescriptorImageInfo imageInfo = {
-                .sampler = textures[i]->getSampler(),
                 .imageView = textures[i]->getImageView(),
                 .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal
             };
@@ -1430,15 +1453,29 @@ private:
             textureDescriptors.push_back(imageInfo);
         }
 
-        vk::WriteDescriptorSet writeDescriptorSet = {
-            .dstSet = m_TextureDescriptorSet,
-            .dstBinding = 0,
-            .descriptorCount = static_cast<uint32_t>(textureDescriptors.size()),
-            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .pImageInfo = textureDescriptors.data()
+        m_TextureSampler = m_VulkanResourceService->createTextureSampler();
+        vk::DescriptorImageInfo samplerDescriptor = {
+            .sampler = m_TextureSampler
         };
 
-        m_Device.updateDescriptorSets(writeDescriptorSet, {});
+        std::array writeDescriptorSets = {
+            vk::WriteDescriptorSet {
+                .dstSet = m_TextureDescriptorSet,
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eSampler,
+                .pImageInfo = &samplerDescriptor
+            },
+            vk::WriteDescriptorSet {
+                .dstSet = m_TextureDescriptorSet,
+                .dstBinding = 1,
+                .descriptorCount = static_cast<uint32_t>(textureDescriptors.size()),
+                .descriptorType = vk::DescriptorType::eSampledImage,
+                .pImageInfo = textureDescriptors.data()
+            }
+        };
+
+        m_Device.updateDescriptorSets(writeDescriptorSets, {});
     }
 
     void createCommandBuffers() {
@@ -1526,8 +1563,6 @@ private:
             .pDepthAttachment = &depthAttachmentInfo
         };
 
-        commandBuffer.beginRendering(renderingInfo);
-
         // Set common command buffer values
         commandBuffer.setViewport(
             0, vk::Viewport(
@@ -1537,6 +1572,8 @@ private:
             )
         );
         commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), m_SwapChainExtent));
+
+        commandBuffer.beginRendering(renderingInfo);
 
         VertexPushConstants vertexPushConstants = {
             .shaderDataStartAddress = m_ComputeDataBuffers[m_FrameIndex].bufferDeviceAddress,
@@ -1622,7 +1659,6 @@ private:
         auto & commandBuffer = m_ComputeCommandBuffers[m_FrameIndex];
         commandBuffer.reset();
 
-        commandBuffer.reset();
         commandBuffer.begin({});
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_ComputePipeline);
         commandBuffer.pushConstants(
@@ -1779,6 +1815,8 @@ private:
 
     vk::raii::DescriptorPool m_DescriptorPool = nullptr;
     vk::raii::DescriptorSet m_TextureDescriptorSet = nullptr;
+
+    vk::Sampler m_TextureSampler = nullptr;
 
     vk::Image m_DepthImage = nullptr;
     vk::DeviceMemory m_DepthImageMemory = nullptr;

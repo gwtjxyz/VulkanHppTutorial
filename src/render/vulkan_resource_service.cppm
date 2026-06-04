@@ -59,7 +59,14 @@ export class VulkanResourceService {
 public:
     VulkanResourceService() {}
 
-    VulkanImageData createTexture(StbImageWrapper & textureImage) {
+    VulkanImageData createCombinedImageSamplerTexture(StbImageWrapper & textureImage) {
+        VulkanImageData imageData = createSampledImageTexture(textureImage);
+        imageData.sampler = createTextureSampler();
+
+        return imageData;
+    }
+
+    VulkanImageData createSampledImageTexture(StbImageWrapper & textureImage) {
         VulkanImageData imageData {};
 
         createTextureImage(textureImage, imageData);
@@ -70,9 +77,33 @@ public:
             vk::ImageAspectFlagBits::eColor,
             imageData.mipLevels
         );
-        imageData.sampler = createTextureSampler();
 
         return imageData;
+    }
+
+    vk::Sampler createTextureSampler() {
+        vk::PhysicalDeviceProperties properties = m_PhysicalDevice.getProperties();
+        // https://docs.vulkan.org/tutorial/latest/06_Texture_mapping/01_Image_view_and_sampler.html#_samplers
+        // for details on what parameters do what ^^
+        vk::SamplerCreateInfo samplerInfo = {
+            .magFilter = vk::Filter::eLinear,
+            .minFilter = vk::Filter::eLinear,
+            .mipmapMode = vk::SamplerMipmapMode::eLinear,
+            .addressModeU = vk::SamplerAddressMode::eRepeat,
+            .addressModeV = vk::SamplerAddressMode::eRepeat,
+            .addressModeW = vk::SamplerAddressMode::eRepeat,
+            .mipLodBias = 0.0f,
+            .anisotropyEnable = vk::True,
+            .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+            .compareEnable = vk::False,
+            .compareOp = vk::CompareOp::eAlways,
+            .minLod = 0.0f,
+            .maxLod = vk::LodClampNone,
+            .borderColor = vk::BorderColor::eIntOpaqueBlack,
+            .unnormalizedCoordinates = vk::False
+        };
+
+        return m_Device.createSampler(samplerInfo);
     }
 
     template <typename T>
@@ -255,8 +286,9 @@ public:
     }
 
     void freeResources(vk::Image & image, vk::DeviceMemory & deviceMemory, vk::ImageView & imageView, vk::Sampler & sampler) const {
-        m_Device.destroySampler(sampler);
-        sampler = nullptr;
+        if (sampler != nullptr) {
+            freeResources(sampler);
+        }
 
         freeResources(image, deviceMemory, imageView);
     }
@@ -269,6 +301,11 @@ public:
         image = nullptr;
         deviceMemory = nullptr;
         imageView = nullptr;
+    }
+
+    void freeResources(vk::Sampler & sampler) const {
+        m_Device.destroySampler(sampler);
+        sampler = nullptr;
     }
 
     vk::Format findDepthFormat() {
@@ -683,31 +720,6 @@ private:
             .subresourceRange = { aspectFlags, 0, mipLevels, 0, 1 }
         };
         return m_Device.createImageView(viewInfo);
-    }
-
-    vk::Sampler createTextureSampler() {
-        vk::PhysicalDeviceProperties properties = m_PhysicalDevice.getProperties();
-        // https://docs.vulkan.org/tutorial/latest/06_Texture_mapping/01_Image_view_and_sampler.html#_samplers
-        // for details on what parameters do what ^^
-        vk::SamplerCreateInfo samplerInfo = {
-            .magFilter = vk::Filter::eLinear,
-            .minFilter = vk::Filter::eLinear,
-            .mipmapMode = vk::SamplerMipmapMode::eLinear,
-            .addressModeU = vk::SamplerAddressMode::eRepeat,
-            .addressModeV = vk::SamplerAddressMode::eRepeat,
-            .addressModeW = vk::SamplerAddressMode::eRepeat,
-            .mipLodBias = 0.0f,
-            .anisotropyEnable = vk::True,
-            .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
-            .compareEnable = vk::False,
-            .compareOp = vk::CompareOp::eAlways,
-            .minLod = 0.0f,
-            .maxLod = vk::LodClampNone,
-            .borderColor = vk::BorderColor::eIntOpaqueBlack,
-            .unnormalizedCoordinates = vk::False
-        };
-
-        return m_Device.createSampler(samplerInfo);
     }
 
     vk::Format findSupportedFormat(const std::vector<vk::Format> & candidates, vk::ImageTiling tiling, vk::FormatFeatureFlags features) const {

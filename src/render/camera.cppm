@@ -63,8 +63,9 @@ public:
         return glm::perspective(glm::radians(m_Zoom), m_AspectRatio, m_Near, m_Far);
     }
 
-    void processKeyboard(const CameraMovement direction, const float deltaTime) {
-        const float velocity = m_MovementSpeed * deltaTime;
+    void processKeyboard(const CameraMovement direction, const float deltaTime, bool sprinting) {
+        float velocity = m_MovementSpeed * deltaTime;
+        if (sprinting) velocity *= 2;
 
         switch (direction) {
             case CameraMovement::FORWARD:
@@ -80,10 +81,10 @@ public:
                 m_Position += m_Right * velocity;
                 break;
             case CameraMovement::UP:
-                m_Position += m_Up * velocity;
+                m_Position += m_WorldUp * velocity;
                 break;
             case CameraMovement::DOWN:
-                m_Position -= m_Up * velocity;
+                m_Position -= m_WorldUp * velocity;
                 break;
         }
     }

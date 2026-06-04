@@ -6,11 +6,8 @@ struct VSInput {
     float2 inUV: TEXCOORD0;
 };
 
-// Not sure why this works without these tags, and why using them causes compiler errors
-// [[vk::combinedImageSampler]]
-Texture2D textureArray[] : register(t0);
-// [[vk::combinedImageSampler]]
-SamplerState samplerArray[] : register(s0);
+[[vk::binding(0)]] SamplerState textureSampler;
+[[vk::binding(1)]] Texture2D textureArray[];
 
 struct ShaderData {
     float4x4 projection;
@@ -60,8 +57,11 @@ VSOutput VSMain(VSInput input) {
 }
 
 float4 PSMain(VSOutput input) : SV_TARGET {
+    // Using descriptor indexing = need to use non uniform index to make sure everything works correctly
+    uint textureIndex = NonUniformResourceIndex(input.textureIndex);
+
     if (input.lightingEnabled == 1) {
-        float3 color = textureArray[input.textureIndex].Sample(samplerArray[input.textureIndex], input.UV).rgb;
+        float3 color = textureArray[textureIndex].Sample(textureSampler, input.UV).rgb;
 
         float3 N = normalize(input.normal.xyz);
         float3 L = normalize(input.lightVec);
@@ -74,7 +74,7 @@ float4 PSMain(VSOutput input) : SV_TARGET {
 
         return float4(diffuse * color.rgb + specular, 1.0);
     } else {
-        float4 sampled = textureArray[input.textureIndex].Sample(samplerArray[input.textureIndex], input.UV);
+        float4 sampled = textureArray[textureIndex].Sample(textureSampler, input.UV);
         return float4(sampled.rgb, 1.0);
     }
 }
