@@ -30,6 +30,7 @@ import render_service_locator;
 import render_types;
 import resource;
 import platform;
+import vulkan_instance;
 import vulkan_resource_service;
 
 import glm;
@@ -44,8 +45,8 @@ import vulkan;
 #ifdef __JETBRAINS_IDE__
 class DispatchLoaderHack {
 public:
-    void init() {}
-    void init(const vk::Instance & instance) { (void)instance; }
+    static void init() {}
+    static void init(const vk::Instance & instance) { (void)instance; }
 };
 
 DispatchLoaderHack dispatchLoaderHack;
@@ -58,10 +59,6 @@ const std::string VIKING_ROOM_MODEL_NAME = "viking_room";
 const std::string VIKING_ROOM_TEXTURE_NAME = "viking_room";
 const std::string TERRAIN_MODEL_NAME = "terrain";
 const std::string TERRAIN_TEXTURE_NAME = "terrain_diffuse";
-
-const std::vector<char const *> validationLayers = {
-    "VK_LAYER_KHRONOS_validation"
-};
 
 #ifdef NDEBUG
 constexpr bool enableValidationLayers = false;
@@ -83,9 +80,9 @@ static void checkVkResult(VkResult err) {
 // Upper layer of the renderer, performs rendering and interfaces with the resource manager
 export class RenderEngine {
 public:
-    void run() {
+    void run(const std::string & appName) {
         initService();
-        initWindow();
+        initWindow(appName);
         initVulkan();
         mainLoop();
         cleanup();
@@ -97,12 +94,12 @@ private:
         Locator::provide(m_VulkanResourceService.get());
     }
 
-    void initWindow() {
+    void initWindow(const std::string & appName) {
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-        m_Window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+        m_Window = glfwCreateWindow(WIDTH, HEIGHT, appName.c_str(), nullptr, nullptr);
         glfwSetWindowUserPointer(m_Window, this);
         glfwSetFramebufferSizeCallback(m_Window, framebufferResizeCallback);
         glfwSetKeyCallback(m_Window, keyCallback);
@@ -188,33 +185,47 @@ private:
     }
 
     void initVulkan() {
-        createInstance();
-        setupDebugMessenger();
-        createSurface();
-        pickPhysicalDevice();
-        createLogicalDevice();
+        // Init core Vulkan stuff
+        m_Instance.initialize(vk::ApiVersion14, enableValidationLayers, m_Window);
+        m_VulkanResourceService->setVulkanInstance(&m_Instance);
+
+        // MSAA (TODO: allow this to be adjusted on the fly?)
+        m_MsaaSamples = getMaxUsableSampleCount();
+
+        // Swapchain
         createSwapChain();
+
+        // GUI
         setupImgui();
-        createImageViews();
-        createCommandPool();
+
+        // Load assets
         loadTextures();
         loadModels();
+
+        // Pipeline layout setup
         createDescriptorSetLayout();
         createComputePipeline();
         createGraphicsPipeline();
         createPointGraphicsPipeline();
-        createColorResources();
-        createDepthResources();
-        createShaderDataBuffers();
-        createComputeBuffers();
         createDescriptorPool();
         createDescriptorSets();
         createCommandBuffers();
         createComputeCommandBuffers();
+
+        // Pipeline draw data
+        createShaderDataBuffers();
+        createComputeBuffers();
+
+        // Image resources to draw into
+        createColorResources();
+        createDepthResources();
+
+        // Sync objects for drawing
         createSyncObjects();
     }
 
     void mainLoop() {
+        // Call this once before the loop starts to initialize delta time
         advanceDeltaTime();
 
         uint32_t frameCount = 0;
@@ -243,7 +254,7 @@ private:
             }
         }
 
-        m_Device.waitIdle();
+        m_Instance.getDevice().waitIdle();
     }
 
     static bool isImguiCapturingKeyboard() {
@@ -296,22 +307,16 @@ private:
     void cleanup() {
         cleanupSwapChain();
 
-        // Render-specific image views
-        const vk::Device deviceHandle = *m_Device;
-
-        m_VulkanResourceService->freeResources(m_DepthImage, m_DepthImageMemory, m_DepthImageView);
-        m_VulkanResourceService->freeResources(m_ColorImage, m_ColorImageMemory, m_ColorImageView);
+        cleanupDepthResources();
+        cleanupColorResources();
         m_VulkanResourceService->freeResources(m_TextureSampler);
 
-        for (const auto & shaderDataBuffer : m_ShaderDataBuffers) {
-            deviceHandle.unmapMemory(shaderDataBuffer.bufferMemory);
-            deviceHandle.freeMemory(shaderDataBuffer.bufferMemory);
-            deviceHandle.destroyBuffer(shaderDataBuffer.buffer);
+        for (auto & shaderDataBuffer : m_ShaderDataBuffers) {
+            m_VulkanResourceService->freeResourcesAndUnmapMemory(shaderDataBuffer.buffer, shaderDataBuffer.bufferMemory);
         }
 
-        for (const auto & computeDataBuffer : m_ComputeDataBuffers) {
-            deviceHandle.freeMemory(computeDataBuffer.bufferMemory);
-            deviceHandle.destroyBuffer(computeDataBuffer.buffer);
+        for (auto & computeDataBuffer : m_ComputeDataBuffers) {
+            m_VulkanResourceService->freeResources(computeDataBuffer.buffer, computeDataBuffer.bufferMemory);
         }
 
         m_ResourceManager.unloadAll();
@@ -334,13 +339,13 @@ private:
         drawUI();
 
         auto [result, imageIndex] = m_SwapChain.acquireNextImage(UINT64_MAX, nullptr, *m_InFlightFences[m_FrameIndex]);
-        auto fenceResult = m_Device.waitForFences(*m_InFlightFences[m_FrameIndex], vk::True, UINT64_MAX);
+        auto fenceResult = m_Instance.getDevice().waitForFences(*m_InFlightFences[m_FrameIndex], vk::True, UINT64_MAX);
         if (fenceResult != vk::Result::eSuccess) {
             throw std::runtime_error("Failed to wait for fence!");
         }
 
         // Only reset the fence if we are submitting work
-        m_Device.resetFences(*m_InFlightFences[m_FrameIndex]);
+        m_Instance.getDevice().resetFences(*m_InFlightFences[m_FrameIndex]);
 
         // Update timeline value for this frame
         uint64_t computeWaitValue = m_TimelineValue;
@@ -380,7 +385,7 @@ private:
                 .pSignalSemaphores = &*m_Semaphore
             };
 
-            m_GraphicsQueue.submit(computeSubmitInfo, nullptr);
+            m_Instance.getGraphicsQueue().submit(computeSubmitInfo, nullptr);
         }
 
         // Graphics
@@ -408,7 +413,7 @@ private:
                 .pSignalSemaphores = &*m_Semaphore
             };
 
-            m_GraphicsQueue.submit(graphicsSubmitInfo, nullptr);
+            m_Instance.getGraphicsQueue().submit(graphicsSubmitInfo, nullptr);
         }
 
         // Present
@@ -420,7 +425,7 @@ private:
                 .pValues = &graphicsSignalValue
             };
             // Wait for graphics to complete before presenting
-            result = m_Device.waitSemaphores(waitInfo, UINT64_MAX);
+            result = m_Instance.getDevice().waitSemaphores(waitInfo, UINT64_MAX);
             if (result != vk::Result::eSuccess) {
                 throw std::runtime_error("failed to wait for semaphores!");
             }
@@ -433,7 +438,7 @@ private:
                 .pImageIndices = &imageIndex
             };
 
-            result = m_GraphicsQueue.presentKHR(presentInfoKHR);
+            result = m_Instance.getGraphicsQueue().presentKHR(presentInfoKHR);
             if ((result == vk::Result::eSuboptimalKHR) || (result == vk::Result::eErrorOutOfDateKHR) || m_FramebufferResized) {
                 m_FramebufferResized = false;
                 recreateSwapChain();
@@ -567,208 +572,13 @@ private:
         m_ComputePushConstants.deltaTime = m_DeltaTime;
     }
 
-    void createInstance() {
-        // Initialize default vulkan dynamic loader
-        // If we're using the vulkan module, the module will do it for us, and we just need to convince our IDE that
-        // the code is valid; otherwise, we need to use a macro to do it ourselves.
-#ifdef DISABLE_VULKAN_MODULE
-        VULKAN_HPP_DEFAULT_DISPATCHER.init();
-#else
-#ifdef __JETBRAINS_IDE__
-        auto & vulkanLoader = dispatchLoaderHack;
-#else
-        auto & vulkanLoader = vk::detail::defaultDispatchLoaderDynamic;
-#endif
-        vulkanLoader.init();
-#endif
-
-        constexpr vk::ApplicationInfo appInfo {
-            .pApplicationName = "Hello Triangle",
-            .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
-            .pEngineName = "No Engine",
-            .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-            .apiVersion = vk::ApiVersion14
-        };
-
-        // Get the required layers
-        // Can configure validation layers further using vk_layer_settings.txt inside Vulkan SDK's Config folder
-        std::vector<char const *> requiredLayers;
-        if (enableValidationLayers) {
-            requiredLayers.assign(validationLayers.begin(), validationLayers.end());
-        }
-
-        // Check if the required layers are supported by the Vulkan implementation
-        auto layerProperties = m_Context.enumerateInstanceLayerProperties();
-        // TODO learn lambdas better so I can write things like these myself
-        if (std::ranges::any_of(
-            requiredLayers, [&layerProperties](auto const & requiredLayer) {
-                return std::ranges::none_of(
-                    layerProperties,
-                    [requiredLayer](auto const & layerProperty) { return strcmp(layerProperty.layerName, requiredLayer) == 0; }
-                );
-            }
-        )) {
-            throw std::runtime_error("One or more required layers are not supported!");
-        }
-
-        // Get required extensions
-        auto requiredExtensions = getRequiredInstanceExtensions();
-
-        // Check if the required extensions are supported by the Vulkan implementation
-        auto extensionProperties = m_Context.enumerateInstanceExtensionProperties();
-
-        auto unsupportedPropertyIt =
-            std::ranges::find_if(
-                requiredExtensions, [&extensionProperties](auto const & requiredExtension) {
-                    return std::ranges::none_of(
-                        extensionProperties, [requiredExtension](auto const & extensionProperty) {
-                            return strcmp(extensionProperty.extensionName, requiredExtension) == 0;
-                        }
-                    );
-                }
-            );
-        if (unsupportedPropertyIt != requiredExtensions.end()) {
-            throw std::runtime_error("Required extension not supported: " + std::string(*unsupportedPropertyIt));
-        }
-
-        vk::InstanceCreateInfo createInfo {
-#ifdef __APPLE__
-            .flags = vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR,
-#endif
-            .pApplicationInfo = &appInfo,
-            .enabledLayerCount = static_cast<uint32_t>(requiredLayers.size()),
-            .ppEnabledLayerNames = requiredLayers.data(),
-            .enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size()),
-            .ppEnabledExtensionNames = requiredExtensions.data(),
-        };
-
-        m_Instance = vk::raii::Instance(m_Context, createInfo);
-
-        // Load function pointers into created instance
-#ifdef DISABLE_VULKAN_MODULE
-        VULKAN_HPP_DEFAULT_DISPATCHER.init(*m_Instance);
-#else
-        vulkanLoader.init(*m_Instance);
-#endif
-    }
-
-    void setupDebugMessenger() {
-        if (!enableValidationLayers) return;
-
-        vk::DebugUtilsMessageSeverityFlagsEXT severityFlags(
-            vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose | vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning | vk::DebugUtilsMessageSeverityFlagBitsEXT::eError
-        );
-        vk::DebugUtilsMessageTypeFlagsEXT messageTypeFlags(
-            vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral | vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance | vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation
-        );
-        vk::DebugUtilsMessengerCreateInfoEXT debugUtilsMessengerCreateInfoEXT {
-            .messageSeverity = severityFlags,
-            .messageType = messageTypeFlags,
-            .pfnUserCallback = &debugCallback
-        };
-        m_DebugMessenger = m_Instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
-    }
-
-    static std::vector<const char *> getRequiredInstanceExtensions() {
-        uint32_t glfwExtensionCount = 0;
-        auto glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-
-        std::vector extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
-        if (enableValidationLayers) {
-            extensions.push_back(vk::EXTDebugUtilsExtensionName);
-        }
-#ifdef __APPLE__
-        // portability enumeration extension for MacOS compatibility
-        extensions.push_back(vk::KHRPortabilityEnumerationExtensionName);
-#endif
-        return extensions;
-    }
-
-    static VKAPI_ATTR vk::Bool32 VKAPI_CALL debugCallback(
-        vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
-        vk::DebugUtilsMessageTypeFlagsEXT type,
-        const vk::DebugUtilsMessengerCallbackDataEXT * pCallbackData, void * pUserData
-    ) {
-        std::cerr << "validation layer: type " << to_string(type) << " msg: " << pCallbackData->pMessage << std::endl;
-
-        return vk::False;
-    }
-
     static vk::PFN_VoidFunction loadVulkanFunctionsForImgui(const char * functionName, void * userData) {
         auto * instance = static_cast<vk::Instance *>(userData);
         return instance->getProcAddr(functionName);
     }
 
-    void createSurface() {
-        VkSurfaceKHR surface;
-        if (glfwCreateWindowSurface(*m_Instance, m_Window, nullptr, &surface) != VkResult::VK_SUCCESS) {
-            throw std::runtime_error("Failed to create window surface!");
-        }
-        m_Surface = vk::raii::SurfaceKHR(m_Instance, surface);
-    }
-
-    void pickPhysicalDevice() {
-        auto physicalDevices = m_Instance.enumeratePhysicalDevices();
-        if (physicalDevices.empty()) {
-            throw std::runtime_error("Failed to find GPUs with Vulkan support!");
-        }
-        auto const devIter = std::ranges::find_if(
-            physicalDevices, [&](auto const & physicalDevice) {
-                return isDeviceSuitable(physicalDevice);
-            }
-        );
-        if (devIter == physicalDevices.end()) {
-            throw std::runtime_error("Failed to find a suitable GPU!");
-        }
-        m_PhysicalDevice = *devIter;
-        m_VulkanResourceService->setPhysicalDevice(m_PhysicalDevice);
-        // TODO: ImGui doesn't like multisampling being set here for some reason, find out why
-        // m_MsaaSamples = vk::SampleCountFlagBits::e1;
-        m_MsaaSamples = getMaxUsableSampleCount();
-    }
-
-    bool isDeviceSuitable(vk::raii::PhysicalDevice const & physicalDevice) {
-        bool supportsVulkan1_3 = physicalDevice.getProperties().apiVersion >= vk::ApiVersion13;
-
-        auto queueFamilies = physicalDevice.getQueueFamilyProperties();
-        bool supportsGraphics = std::ranges::any_of(queueFamilies, [](auto const & qfp) { return !!(qfp.queueFlags & vk::QueueFlagBits::eGraphics); });
-
-        auto availableDeviceExtensions = physicalDevice.enumerateDeviceExtensionProperties();
-
-        bool supportsAllRequiredExtensions = std::ranges::all_of(
-            m_RequiredDeviceExtensions, [&availableDeviceExtensions](auto const & requiredDeviceExtension) {
-                return std::ranges::any_of(
-                    availableDeviceExtensions, [requiredDeviceExtension](const auto & availableDeviceExtension) {
-                        return strcmp(availableDeviceExtension.extensionName, requiredDeviceExtension) == 0;
-                    }
-                );
-            }
-        );
-
-        auto features = physicalDevice.getFeatures2<vk::PhysicalDeviceFeatures2,
-                                                    vk::PhysicalDeviceVulkan11Features,
-                                                    vk::PhysicalDeviceVulkan12Features,
-                                                    vk::PhysicalDeviceVulkan13Features,
-                                                    vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
-        bool supportsRequiredFeatures =
-            features.get<vk::PhysicalDeviceFeatures2>().features.samplerAnisotropy &&
-            features.get<vk::PhysicalDeviceFeatures2>().features.shaderInt64 &&
-            features.get<vk::PhysicalDeviceVulkan11Features>().shaderDrawParameters &&
-            features.get<vk::PhysicalDeviceVulkan12Features>().shaderSampledImageArrayNonUniformIndexing &&
-            features.get<vk::PhysicalDeviceVulkan12Features>().descriptorBindingVariableDescriptorCount &&
-            features.get<vk::PhysicalDeviceVulkan12Features>().runtimeDescriptorArray &&
-            features.get<vk::PhysicalDeviceVulkan12Features>().bufferDeviceAddress &&
-            features.get<vk::PhysicalDeviceVulkan12Features>().descriptorIndexing &&
-            features.get<vk::PhysicalDeviceVulkan12Features>().timelineSemaphore &&
-            features.get<vk::PhysicalDeviceVulkan13Features>().dynamicRendering &&
-            features.get<vk::PhysicalDeviceVulkan13Features>().synchronization2 &&
-            features.get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState;
-
-        return supportsVulkan1_3 && supportsGraphics && supportsAllRequiredExtensions && supportsRequiredFeatures;
-    }
-
     vk::SampleCountFlagBits getMaxUsableSampleCount() const {
-        vk::PhysicalDeviceProperties physicalDeviceProperties = m_PhysicalDevice.getProperties();
+        vk::PhysicalDeviceProperties physicalDeviceProperties = m_Instance.getPhysicalDeviceProperties();
 
         vk::SampleCountFlags counts = physicalDeviceProperties.limits.framebufferColorSampleCounts & physicalDeviceProperties.limits.framebufferDepthSampleCounts;
         if (counts & vk::SampleCountFlagBits::e64) { return vk::SampleCountFlagBits::e64; };
@@ -781,84 +591,20 @@ private:
         return vk::SampleCountFlagBits::e1;
     }
 
-    void createLogicalDevice() {
-        std::vector<vk::QueueFamilyProperties> queueFamilyProperties = m_PhysicalDevice.getQueueFamilyProperties();
-
-        // Just using one queue for everything for now for simplicity's sake
-        // TODO use multiple queues eventually
-        for (uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++) {
-            if ((queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eGraphics) &&
-                (queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eCompute) &&
-                m_PhysicalDevice.getSurfaceSupportKHR(qfpIndex, *m_Surface)) {
-                // found a queue family that supports graphics, compute and present
-                m_QueueIndex = qfpIndex;
-                break;
-            }
-        }
-        if (m_QueueIndex == ~0) {
-            throw std::runtime_error("Could not find a queue for graphics and present -> terminating");
-        }
-
-        // Create a chain of feature structures
-        vk::StructureChain<
-            vk::PhysicalDeviceFeatures2,
-            vk::PhysicalDeviceVulkan11Features,
-            vk::PhysicalDeviceVulkan12Features,
-            vk::PhysicalDeviceVulkan13Features,
-            vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT
-        > featureChain = {
-            {                                                                   // vk::PhysicalDeviceFeatures2
-                .features = {
-                    .samplerAnisotropy = true,
-                    .shaderInt64 = true
-                }
-            },
-            { .shaderDrawParameters = true },                                 // Enable shader draw parameters from Vulkan 1.1, necessary for shader objects (I think)
-            {
-                .descriptorIndexing = true,                                     // Enable descriptor indexing for "bindless" uniforms
-                .shaderSampledImageArrayNonUniformIndexing = true,
-                .descriptorBindingVariableDescriptorCount = true,
-                .runtimeDescriptorArray = true,
-                .timelineSemaphore = true,
-                .bufferDeviceAddress = true                                     // Enable accessing buffers via pointers instead of needing descriptors
-            },
-            { .synchronization2 = true, .dynamicRendering = true },           // Enable dynamic rendering from Vulkan 1.3
-            { .extendedDynamicState = true },                                 // Enable extended dynamic state from the extension
-        };
-
-        float queuePriority = 0.5f;
-        vk::DeviceQueueCreateInfo deviceQueueCreateInfo {
-            .queueFamilyIndex = m_QueueIndex,
-            .queueCount = 1,
-            .pQueuePriorities = &queuePriority
-        };
-
-        vk::DeviceCreateInfo deviceCreateInfo {
-            .pNext = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
-            .queueCreateInfoCount = 1,
-            .pQueueCreateInfos = &deviceQueueCreateInfo,
-            .enabledExtensionCount = static_cast<uint32_t>(m_RequiredDeviceExtensions.size()),
-            .ppEnabledExtensionNames = m_RequiredDeviceExtensions.data()
-        };
-
-        m_Device = vk::raii::Device(m_PhysicalDevice, deviceCreateInfo);
-        m_VulkanResourceService->setDevice(m_Device);
-        m_GraphicsQueue = vk::raii::Queue(m_Device, m_QueueIndex, 0);
-        m_VulkanResourceService->setGraphicsQueue(m_GraphicsQueue);
-    }
-
     void createSwapChain() {
-        vk::SurfaceCapabilitiesKHR surfaceCapabilities = m_PhysicalDevice.getSurfaceCapabilitiesKHR(*m_Surface);
+        auto physicalDevice = m_Instance.getPhysicalDevice();
+        auto surface = m_Instance.getSurface();
+        vk::SurfaceCapabilitiesKHR surfaceCapabilities = physicalDevice.getSurfaceCapabilitiesKHR(surface);
         m_SwapChainExtent = chooseSwapExtent(surfaceCapabilities);
         uint32_t minImageCount = chooseSwapMinImageCount(surfaceCapabilities);
 
-        std::vector<vk::SurfaceFormatKHR> availableFormats = m_PhysicalDevice.getSurfaceFormatsKHR(*m_Surface);
+        std::vector<vk::SurfaceFormatKHR> availableFormats = physicalDevice.getSurfaceFormatsKHR(surface);
         m_SwapChainSurfaceFormat = chooseSwapSurfaceFormat(availableFormats);
 
-        std::vector<vk::PresentModeKHR> availablePresentModes = m_PhysicalDevice.getSurfacePresentModesKHR(*m_Surface);
+        std::vector<vk::PresentModeKHR> availablePresentModes = physicalDevice.getSurfacePresentModesKHR(surface);
 
         vk::SwapchainCreateInfoKHR swapChainCreateInfo = {
-            .surface = *m_Surface,
+            .surface = surface,
             .minImageCount = minImageCount,
             .imageFormat = m_SwapChainSurfaceFormat.format,
             .imageColorSpace = m_SwapChainSurfaceFormat.colorSpace,
@@ -872,8 +618,18 @@ private:
             .clipped = true
         };
 
-        m_SwapChain = vk::raii::SwapchainKHR(m_Device, swapChainCreateInfo);
+        m_SwapChain = vk::raii::SwapchainKHR(m_Instance.getRaiiDevice(), swapChainCreateInfo);
         m_SwapChainImages = m_SwapChain.getImages();
+
+        assert(m_SwapChainImageViews.empty());
+        for (auto & image : m_SwapChainImages) {
+            m_SwapChainImageViews.emplace_back(m_VulkanResourceService->createImageView(
+                image,
+                m_SwapChainSurfaceFormat.format,
+                vk::ImageAspectFlagBits::eColor,
+                1
+            ));
+        }
 
         // Set aspect ratio for camera
         m_Camera.updateAspectRatio(
@@ -941,11 +697,11 @@ private:
 
         ImGui_ImplVulkan_InitInfo initInfo = {
             .ApiVersion = vk::ApiVersion14,
-            .Instance = *m_Instance,
-            .PhysicalDevice = *m_PhysicalDevice,
-            .Device = *m_Device,
-            .QueueFamily = m_QueueIndex,
-            .Queue = *m_GraphicsQueue,
+            .Instance = m_Instance.getInstance(),
+            .PhysicalDevice = m_Instance.getPhysicalDevice(),
+            .Device = m_Instance.getDevice(),
+            .QueueFamily = m_Instance.getQueueIndex(),
+            .Queue = m_Instance.getGraphicsQueue(),
             .DescriptorPoolSize = 8,
             .MinImageCount = 2,
             .ImageCount = 2,
@@ -963,29 +719,11 @@ private:
         };
 
         // Need to load Vulkan functions before calling init
-        const vk::Instance * instancePtr = &*m_Instance;
-        ImGui_ImplVulkan_LoadFunctions(vk::ApiVersion14, loadVulkanFunctionsForImgui, const_cast<vk::Instance *>(instancePtr));
+        auto instance = m_Instance.getInstance();
+        auto instancePtr = &instance;
+        ImGui_ImplVulkan_LoadFunctions(vk::ApiVersion14, loadVulkanFunctionsForImgui, instancePtr);
 
         ImGui_ImplVulkan_Init(&initInfo);
-    }
-
-    void createImageViews() {
-        assert(m_SwapChainImageViews.empty());
-
-        for (auto & image : m_SwapChainImages) {
-            m_SwapChainImageViews.emplace_back(createImageView(image, m_SwapChainSurfaceFormat.format, vk::ImageAspectFlagBits::eColor, 1));
-        }
-    }
-
-    [[nodiscard]]
-    vk::raii::ImageView createImageView(const vk::Image & image, const vk::Format format, vk::ImageAspectFlags aspectFlags, uint32_t mipLevels) const {
-        vk::ImageViewCreateInfo viewInfo = {
-            .image = image,
-            .viewType = vk::ImageViewType::e2D,
-            .format = format,
-            .subresourceRange = { aspectFlags, 0, mipLevels, 0, 1 }
-        };
-        return { m_Device, viewInfo };
     }
 
     // We are only using this for textures
@@ -1026,12 +764,12 @@ private:
             .pBindings = bindings.data()
         };
 
-        m_TextureDescriptorSetLayout = vk::raii::DescriptorSetLayout(m_Device, layoutInfo);
+        m_TextureDescriptorSetLayout = vk::raii::DescriptorSetLayout(m_Instance.getRaiiDevice(), layoutInfo);
     }
 
     void createComputePipeline() {
         auto [csShaderModule, csShaderStageInfo] = m_ShaderCompiler.compileAndGetCreateInfo(
-            m_Device,
+            m_Instance.getRaiiDevice(),
             "shaders/particle_compute_shader.hlsl",
             HlslShaderStage::COMPUTE
         );
@@ -1047,24 +785,24 @@ private:
             .pushConstantRangeCount = 1,
             .pPushConstantRanges = &pushConstantRange
         };
-        m_ComputePipelineLayout = m_Device.createPipelineLayout(pipelineLayoutInfo);
+        m_ComputePipelineLayout = m_Instance.getRaiiDevice().createPipelineLayout(pipelineLayoutInfo);
 
         vk::ComputePipelineCreateInfo pipelineCreateInfo = {
             .stage = csShaderStageInfo,
             .layout = m_ComputePipelineLayout
         };
 
-        m_ComputePipeline = m_Device.createComputePipeline(nullptr, pipelineCreateInfo);
+        m_ComputePipeline = m_Instance.getRaiiDevice().createComputePipeline(nullptr, pipelineCreateInfo);
     }
 
     void createGraphicsPipeline() {
         auto [vsShaderModule, vsShaderStageInfo] = m_ShaderCompiler.compileAndGetCreateInfo(
-            m_Device,
+            m_Instance.getRaiiDevice(),
             "shaders/main_shader.hlsl",
             HlslShaderStage::VERTEX
         );
         auto [psShaderModule, psShaderStageInfo] = m_ShaderCompiler.compileAndGetCreateInfo(
-            m_Device,
+            m_Instance.getRaiiDevice(),
             "shaders/main_shader.hlsl",
             HlslShaderStage::PIXEL
         );
@@ -1139,7 +877,7 @@ private:
             .pushConstantRangeCount = 1,                            // # of push constant ranges
             .pPushConstantRanges = &pushConstantRange               // Pointer to push constant ranges
         };
-        m_GraphicsPipelineLayout = vk::raii::PipelineLayout(m_Device, pipelineLayoutInfo);
+        m_GraphicsPipelineLayout = vk::raii::PipelineLayout(m_Instance.getRaiiDevice(), pipelineLayoutInfo);
 
         vk::Format depthFormat = m_VulkanResourceService->findDepthFormat();
         vk::PipelineRenderingCreateInfo pipelineRenderingCreateInfo {
@@ -1163,17 +901,17 @@ private:
             .renderPass = nullptr                   // we're using dynamic rendering instead of render passes
         };
 
-        m_GraphicsPipeline = vk::raii::Pipeline(m_Device, nullptr, pipelineInfo);
+        m_GraphicsPipeline = vk::raii::Pipeline(m_Instance.getRaiiDevice(), nullptr, pipelineInfo);
     }
 
     void createPointGraphicsPipeline() {
         auto [vsShaderModule, vsShaderStageInfo] = m_ShaderCompiler.compileAndGetCreateInfo(
-            m_Device,
+            m_Instance.getRaiiDevice(),
             "shaders/particle_graphics_shader.hlsl",
             HlslShaderStage::VERTEX
         );
         auto [psShaderModule, psShaderStageInfo] = m_ShaderCompiler.compileAndGetCreateInfo(
-            m_Device,
+            m_Instance.getRaiiDevice(),
             "shaders/particle_graphics_shader.hlsl",
             HlslShaderStage::PIXEL
         );
@@ -1254,7 +992,7 @@ private:
             .pushConstantRangeCount = 1,                            // # of push constant ranges
             .pPushConstantRanges = &pushConstantRange               // Pointer to push constant ranges
         };
-        m_PointGraphicsPipelineLayout = vk::raii::PipelineLayout(m_Device, pipelineLayoutInfo);
+        m_PointGraphicsPipelineLayout = vk::raii::PipelineLayout(m_Instance.getRaiiDevice(), pipelineLayoutInfo);
 
         vk::Format depthFormat = m_VulkanResourceService->findDepthFormat();
         vk::PipelineRenderingCreateInfo pipelineRenderingCreateInfo {
@@ -1279,28 +1017,7 @@ private:
             .renderPass = nullptr                   // we're using dynamic rendering instead of render passes
         };
 
-        m_PointGraphicsPipeline = vk::raii::Pipeline(m_Device, nullptr, pipelineInfo);
-    }
-
-    [[nodiscard]]
-    vk::raii::ShaderModule createShaderModule(const std::vector<char> & code) const {
-        vk::ShaderModuleCreateInfo createInfo {
-            .codeSize = code.size() * sizeof(char),
-            .pCode = reinterpret_cast<const uint32_t *>(code.data())
-        };
-
-        vk::raii::ShaderModule shaderModule { m_Device, createInfo };
-        return shaderModule;
-    }
-
-    void createCommandPool() {
-        vk::CommandPoolCreateInfo poolInfo {
-            .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
-            .queueFamilyIndex = m_QueueIndex
-        };
-
-        m_CommandPool = vk::raii::CommandPool(m_Device, poolInfo);
-        m_VulkanResourceService->setCommandPool(m_CommandPool);
+        m_PointGraphicsPipeline = vk::raii::Pipeline(m_Instance.getRaiiDevice(), nullptr, pipelineInfo);
     }
 
     void createColorResources() {
@@ -1322,11 +1039,6 @@ private:
         m_DepthImageView = depthResources.imageView;
     }
 
-    // TODO remove? (unused)
-    static bool hasStencilComponent(vk::Format format) {
-        return format == vk::Format::eD32SfloatS8Uint || format == vk::Format::eD24UnormS8Uint;
-    }
-
     void loadTextures() {
         auto vikingRoomTextureHandle = m_ResourceManager.load<Texture>(VIKING_ROOM_TEXTURE_NAME);
         auto terrainTextureHandle = m_ResourceManager.load<Texture>(TERRAIN_TEXTURE_NAME);
@@ -1335,30 +1047,6 @@ private:
     void loadModels() {
         auto vikingRoomModelHandle = m_ResourceManager.load<Mesh>(VIKING_ROOM_MODEL_NAME);
         auto terrainModelhandle = m_ResourceManager.load<Mesh>(TERRAIN_MODEL_NAME);
-    }
-
-    vk::raii::CommandBuffer beginSingleTimeCommands() {
-        vk::CommandBufferAllocateInfo allocInfo = {
-            .commandPool = m_CommandPool,
-            .level = vk::CommandBufferLevel::ePrimary,
-            .commandBufferCount = 1
-        };
-        vk::raii::CommandBuffer commandBuffer = std::move(m_Device.allocateCommandBuffers(allocInfo).front());
-
-        vk::CommandBufferBeginInfo beginInfo { .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit };
-        commandBuffer.begin(beginInfo);
-
-        return commandBuffer;
-    }
-
-    void endSingleTimeCommands(vk::raii::CommandBuffer & commandBuffer) {
-        commandBuffer.end();
-
-        vk::SubmitInfo submitInfo { .commandBufferCount = 1, .pCommandBuffers = &*commandBuffer };
-        m_GraphicsQueue.submit(submitInfo, nullptr);
-        // using a fence instead of waitIdle() would allow us to schedule multiple transfer simultaneously and
-        // wait for all of them to complete instead of executing one at a time. ( = likely better optimization)
-        m_GraphicsQueue.waitIdle();
     }
 
     void createShaderDataBuffers() {
@@ -1418,7 +1106,7 @@ private:
             .poolSizeCount = static_cast<uint32_t>(poolSize.size()),
             .pPoolSizes = poolSize.data()
         };
-        m_DescriptorPool = vk::raii::DescriptorPool(m_Device, poolInfo);
+        m_DescriptorPool = vk::raii::DescriptorPool(m_Instance.getRaiiDevice(), poolInfo);
     }
 
     void createDescriptorSets() {
@@ -1434,11 +1122,11 @@ private:
             .pSetLayouts = &*m_TextureDescriptorSetLayout
         };
         m_TextureDescriptorSet.clear();
-        m_TextureDescriptorSet = std::move(m_Device.allocateDescriptorSets(textureDescriptorSetAllocInfo).front());
+        m_TextureDescriptorSet = std::move(m_Instance.getRaiiDevice().allocateDescriptorSets(textureDescriptorSetAllocInfo).front());
 
         // For more than one texture, existing textures need to be collected into an array and written from there
         // TODO make something more robust
-        std::array<Texture *, 2> textures = {
+        std::array textures = {
             m_ResourceManager.getResource<Texture>(VIKING_ROOM_TEXTURE_NAME),
             m_ResourceManager.getResource<Texture>(TERRAIN_TEXTURE_NAME)
         };
@@ -1475,27 +1163,27 @@ private:
             }
         };
 
-        m_Device.updateDescriptorSets(writeDescriptorSets, {});
+        m_Instance.getRaiiDevice().updateDescriptorSets(writeDescriptorSets, {});
     }
 
     void createCommandBuffers() {
         vk::CommandBufferAllocateInfo allocInfo {
-            .commandPool = m_CommandPool,
+            .commandPool = m_Instance.getCommandPool(),
             .level = vk::CommandBufferLevel::ePrimary,
             .commandBufferCount = MAX_FRAMES_IN_FLIGHT
         };
 
-        m_CommandBuffers = vk::raii::CommandBuffers(m_Device, allocInfo);
+        m_CommandBuffers = vk::raii::CommandBuffers(m_Instance.getRaiiDevice(), allocInfo);
     }
 
     void createComputeCommandBuffers() {
         vk::CommandBufferAllocateInfo allocInfo = {
-            .commandPool = m_CommandPool,
+            .commandPool = m_Instance.getCommandPool(),
             .level = vk::CommandBufferLevel::ePrimary,
             .commandBufferCount = MAX_FRAMES_IN_FLIGHT
         };
 
-        m_ComputeCommandBuffers = vk::raii::CommandBuffers(m_Device, allocInfo);
+        m_ComputeCommandBuffers = vk::raii::CommandBuffers(m_Instance.getRaiiDevice(), allocInfo);
     }
 
     void recordCommandBuffer(uint32_t imageIndex) {
@@ -1655,7 +1343,7 @@ private:
         commandBuffer.end();
     }
 
-    void recordComputeCommandBuffer() {
+    void recordComputeCommandBuffer() const {
         auto & commandBuffer = m_ComputeCommandBuffers[m_FrameIndex];
         commandBuffer.reset();
 
@@ -1680,28 +1368,27 @@ private:
             .semaphoreType = vk::SemaphoreType::eTimeline,
             .initialValue = 0
         };
-        m_Semaphore = m_Device.createSemaphore({ .pNext = &semaphoreType });
+        m_Semaphore = m_Instance.getRaiiDevice().createSemaphore({ .pNext = &semaphoreType });
 
         for (size_t i = 0; i < m_SwapChainImages.size(); ++i) {
-            m_InFlightFences.emplace_back(m_Device, vk::FenceCreateInfo {});
+            m_InFlightFences.emplace_back(m_Instance.getRaiiDevice(), vk::FenceCreateInfo {});
         }
     }
 
     void cleanupSwapChain() {
+        for (auto & imageView : m_SwapChainImageViews) {
+            m_VulkanResourceService->freeResources(imageView);
+        }
         m_SwapChainImageViews.clear();
         m_SwapChain = nullptr; // doing this automatically calls the destructor which in turn calls swapChain.clear()
     }
 
-    void cleanupColorResources(const vk::Device & device) const {
-        device.destroyImageView(m_ColorImageView);
-        device.destroyImage(m_ColorImage);
-        device.freeMemory(m_ColorImageMemory);
+    void cleanupColorResources() {
+        m_VulkanResourceService->freeResources(m_ColorImage, m_ColorImageMemory, m_ColorImageView);
     }
 
-    void cleanupDepthResources(const vk::Device & device) const {
-        device.destroyImageView(m_DepthImageView);
-        device.destroyImage(m_DepthImage);
-        device.freeMemory(m_DepthImageMemory);
+    void cleanupDepthResources() {
+        m_VulkanResourceService->freeResources(m_DepthImage, m_DepthImageMemory, m_DepthImageView);
     }
 
     void recreateSwapChain() {
@@ -1717,21 +1404,18 @@ private:
             glfwWaitEvents();
         }
 
-        m_Device.waitIdle();
-
-        const auto & deviceHandle = *m_Device;
+        m_Instance.getDevice().waitIdle();
 
         cleanupSwapChain();
         createSwapChain();
-        createImageViews();
-        cleanupColorResources(deviceHandle);
+        cleanupColorResources();
         createColorResources();
-        cleanupDepthResources(deviceHandle);
+        cleanupDepthResources();
         createDepthResources();
     }
 
     void recompileShadersAndRecreatePipeline() {
-        m_Device.waitIdle();
+        m_Instance.getDevice().waitIdle();
 
         m_ComputePipeline.clear();
         m_GraphicsPipeline.clear();
@@ -1747,8 +1431,6 @@ private:
     std::shared_ptr<VulkanResourceService> m_VulkanResourceService = nullptr;
     ResourceManager m_ResourceManager {};
     HlslShaderCompiler m_ShaderCompiler {};
-
-    GLFWwindow * m_Window = nullptr;
 
     Camera m_Camera {};
 
@@ -1766,20 +1448,15 @@ private:
     bool m_CanUiFocusBeToggled = false;     // Seems janky, should probably move to a more robust input state handling method later
     bool m_IsModelSpinEnabled = true;
 
-    vk::raii::Context m_Context;
-    vk::raii::Instance m_Instance = nullptr;
-    vk::raii::DebugUtilsMessengerEXT m_DebugMessenger = nullptr;
-    vk::raii::SurfaceKHR m_Surface = nullptr;
-    vk::raii::PhysicalDevice m_PhysicalDevice = nullptr;
-    uint32_t m_QueueIndex = ~0;
-    vk::raii::Device m_Device = nullptr;
-    vk::raii::Queue m_GraphicsQueue = nullptr;
+    GLFWwindow * m_Window = nullptr;
+
+    VulkanInstance m_Instance {};
 
     vk::raii::SwapchainKHR m_SwapChain = nullptr;
     std::vector<vk::Image> m_SwapChainImages;
     vk::SurfaceFormatKHR m_SwapChainSurfaceFormat;
     vk::Extent2D m_SwapChainExtent;
-    std::vector<vk::raii::ImageView> m_SwapChainImageViews;
+    std::vector<vk::ImageView> m_SwapChainImageViews;
     bool m_FramebufferResized = false;
 
     vk::raii::PipelineLayout m_ComputePipelineLayout = nullptr;
@@ -1794,7 +1471,6 @@ private:
 
     bool m_ShadersSetToReload = false;
 
-    vk::raii::CommandPool m_CommandPool = nullptr;
     std::vector<vk::raii::CommandBuffer> m_CommandBuffers {};
     std::vector<vk::raii::CommandBuffer> m_ComputeCommandBuffers {};
 

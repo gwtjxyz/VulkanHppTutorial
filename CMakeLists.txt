@@ -45,111 +45,101 @@ find_package (tinyobjloader REQUIRED)
 # a problem as long as the major version is the same
 find_package (Vulkan 1.4.351 QUIET)
 
-# Add option to enable/disable C++ 20 module
-option(ENABLE_CPP20_MODULE "Enable C++ 20 module support for Vulkan" ON)
-
 # to better handle window resizing with Vulkan
 add_compile_definitions(VULKAN_HPP_HANDLE_ERROR_OUT_OF_DATE_AS_SUCCESS)
 
-# Enable C++ module dependency scanning only if C++ 20 module is enabled
-# This thing is super scuffed, will not compile without modules or MSVC (I hate CMake so I'm not fixing it until I absolutely have to)
-if(ENABLE_CPP20_MODULE)
-    set(CMAKE_CXX_SCAN_FOR_MODULES ON)
-
-    # Mac support wizardry
-    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-        # First, check the compiler
-        if (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-            message(FATAL_ERROR "Cannot use Apple Clang together with modules; either switch off module support or use LLVM Clang.")
-        endif()
-        message("If CMake fails with the error \"libc++.modules.json resource does not exist\", consider applying this workaround:")
-        message("https://github.com/llvm/llvm-project/issues/109895#issuecomment-3803292485")
-
-        # Maybe one day module std will be usable on Mac, but not today!
-        add_compile_definitions(DISABLE_VULKAN_MODULE DISABLE_IMPORT_STD)
+# Mac support wizardry
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    # First, check the compiler
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+        message(FATAL_ERROR "Cannot use Apple Clang together with modules; either switch off module support or use LLVM Clang.")
     endif()
+    message("If CMake fails with the error \"libc++.modules.json resource does not exist\", consider applying this workaround:")
+    message("https://github.com/llvm/llvm-project/issues/109895#issuecomment-3803292485")
 
-    if (Vulkan_FOUND)
-        # Set up Vulkan C++ module as a static library
-        add_library(Vulkan-HppModule STATIC)
-        add_library(Vulkan::HppModule ALIAS Vulkan-HppModule)
-
-        if(NOT DISABLE_VULKAN_MODULE)
-            target_sources(Vulkan-HppModule
-                    PUBLIC
-                    FILE_SET CXX_MODULES
-                    BASE_DIRS ${Vulkan_INCLUDE_DIR}
-                    FILES
-                    ${Vulkan_INCLUDE_DIR}/vulkan/vulkan.cppm
-                    ${Vulkan_INCLUDE_DIR}/vulkan/vulkan_video.cppm
-            )
-        endif()
-    else()
-        FetchContent_Declare(vulkan-headers
-                GIT_REPOSITORY "https://github.com/KhronosGroup/Vulkan-Headers.git"
-                GIT_TAG "v1.4.351"
-                GIT_SHALLOW ON
-                OVERRIDE_FIND_PACKAGE
-                SYSTEM)
-        FetchContent_MakeAvailable(vulkan-headers)
-        # make sure to set up the include path for CMake
-        set(Vulkan_INCLUDE_DIR "${vulkan-headers_SOURCE_DIR}/include")
-        message("Vulkan_INCLUDE_DIR is ${Vulkan_INCLUDE_DIR}")
-    endif()
-
-    # Configure the module target (import std currently requires C++23 with CMake)
-    target_compile_features(Vulkan-HppModule PUBLIC cxx_std_23)
-    if(NOT DISABLE_VULKAN_MODULE)
-       set_target_properties(Vulkan-HppModule PROPERTIES CXX_MODULE_STD ON)
-    endif()
-
-    # Use dynamic dispatcher
-    target_link_libraries(Vulkan-HppModule PUBLIC Vulkan::Headers)
-#    if (NOT DISABLE_VULKAN_MODULE)
-    target_compile_definitions(Vulkan-HppModule PUBLIC VULKAN_HPP_DISPATCH_LOADER_DYNAMIC)
-#    endif()
-
-    # Static dispatcher usage would look something like this
-    # (currently doesn't work, would probably need to make changes to find_package(vulkan) line)
-    #
-    # target_link_libraries(Vulkan-HppModule PUBLIC Vulkan::Vulkan)
-
-    target_compile_definitions(Vulkan-HppModule
-            PUBLIC
-            VULKAN_HPP_NO_STRUCT_CONSTRUCTORS=1             # Designated initializer support
-            VK_ENABLE_BETA_EXTENSIONS                       # For MacOS support
-    )
-
-    # GLM hack based on this: https://github.com/g-truc/glm/issues/1372#issuecomment-3042171253
-    add_library(glm-module)
-    if(MSVC)
-        # Add MSVC-specific compiler options for proper C++ module support
-        # Need this so GLM knows what C++ version we have and properly includes its hash header
-        target_compile_options(glm-module PRIVATE
-                /std:c++latest      # Use latest C++ standard for better module support
-                /permissive-        # Standards conformance mode
-                /Zc:__cplusplus     # Enable correct __cplusplus macro
-                /EHsc               # Enable C++ exception handling
-                /Zc:preprocessor    # Use conforming preprocessor
-                /translateInclude   # Automatically translate #include to import for standard library
-        )
-    endif()
-    target_sources(glm-module PUBLIC
-        FILE_SET CXX_MODULES
-        FILES
-        "${CMAKE_SOURCE_DIR}/modules/glm.cppm"
-    )
-    target_link_libraries(glm-module PUBLIC glm::glm)
-
-    # TODO maybe add __cplusplus definition to this too, works fine without it so far though so will do later if problems arise
-    add_library(tinyobjloader-module)
-    target_sources(tinyobjloader-module PUBLIC
-        FILE_SET CXX_MODULES
-        FILES
-        "${CMAKE_SOURCE_DIR}/modules/tinyobjloader.cppm"
-    )
-    target_link_libraries(tinyobjloader-module PUBLIC tinyobjloader::tinyobjloader)
+    # Maybe one day module std will be usable on Mac, but not today!
+    add_compile_definitions(DISABLE_VULKAN_MODULE DISABLE_IMPORT_STD)
 endif()
+
+if (Vulkan_FOUND)
+    # Set up Vulkan C++ module as a static library
+    add_library(Vulkan-HppModule STATIC)
+    add_library(Vulkan::HppModule ALIAS Vulkan-HppModule)
+
+    if(NOT DISABLE_VULKAN_MODULE)
+        target_sources(Vulkan-HppModule
+                PUBLIC
+                FILE_SET CXX_MODULES
+                BASE_DIRS ${Vulkan_INCLUDE_DIR}
+                FILES
+                ${Vulkan_INCLUDE_DIR}/vulkan/vulkan.cppm
+                ${Vulkan_INCLUDE_DIR}/vulkan/vulkan_video.cppm
+        )
+
+    endif()
+else()
+    FetchContent_Declare(vulkan-headers
+            GIT_REPOSITORY "https://github.com/KhronosGroup/Vulkan-Headers.git"
+            GIT_TAG "v1.4.351"
+            GIT_SHALLOW ON
+            OVERRIDE_FIND_PACKAGE
+            SYSTEM)
+    FetchContent_MakeAvailable(vulkan-headers)
+    # make sure to set up the include path for CMake
+    set(Vulkan_INCLUDE_DIR "${vulkan-headers_SOURCE_DIR}/include")
+    message("Vulkan_INCLUDE_DIR is ${Vulkan_INCLUDE_DIR}")
+endif()
+
+# Configure the module target (import std currently requires C++23 with CMake)
+target_compile_features(Vulkan-HppModule PUBLIC cxx_std_23)
+if(NOT DISABLE_VULKAN_MODULE)
+   set_target_properties(Vulkan-HppModule PROPERTIES CXX_MODULE_STD ON)
+endif()
+
+# Use dynamic dispatcher
+target_link_libraries(Vulkan-HppModule PUBLIC Vulkan::Headers)
+target_compile_definitions(Vulkan-HppModule PUBLIC VULKAN_HPP_DISPATCH_LOADER_DYNAMIC)
+
+# Static dispatcher usage would look something like this
+# (currently doesn't work, would probably need to make changes to find_package(vulkan) line)
+#
+# target_link_libraries(Vulkan-HppModule PUBLIC Vulkan::Vulkan)
+
+target_compile_definitions(Vulkan-HppModule
+        PUBLIC
+        VULKAN_HPP_NO_STRUCT_CONSTRUCTORS=1             # Designated initializer support
+        VK_ENABLE_BETA_EXTENSIONS                       # For MacOS support
+)
+
+# GLM hack based on this: https://github.com/g-truc/glm/issues/1372#issuecomment-3042171253
+add_library(glm-module)
+if(MSVC)
+    # Add MSVC-specific compiler options for proper C++ module support
+    # Need this so GLM knows what C++ version we have and properly includes its hash header
+    target_compile_options(glm-module PRIVATE
+            /std:c++latest      # Use latest C++ standard for better module support
+            /permissive-        # Standards conformance mode
+            /Zc:__cplusplus     # Enable correct __cplusplus macro
+            /EHsc               # Enable C++ exception handling
+            /Zc:preprocessor    # Use conforming preprocessor
+            /translateInclude   # Automatically translate #include to import for standard library
+    )
+endif()
+target_sources(glm-module PUBLIC
+    FILE_SET CXX_MODULES
+    FILES
+    "${CMAKE_SOURCE_DIR}/modules/glm.cppm"
+)
+target_link_libraries(glm-module PUBLIC glm::glm)
+
+# TODO maybe add __cplusplus definition to this too, works fine without it so far though so will do later if problems arise
+add_library(tinyobjloader-module)
+target_sources(tinyobjloader-module PUBLIC
+    FILE_SET CXX_MODULES
+    FILES
+    "${CMAKE_SOURCE_DIR}/modules/tinyobjloader.cppm"
+)
+target_link_libraries(tinyobjloader-module PUBLIC tinyobjloader::tinyobjloader)
 
 # ImGui
 add_library(ImGui)
@@ -167,24 +157,31 @@ target_sources(ImGui PUBLIC ${IMGUI_SOURCES})
 target_include_directories(ImGui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends ${IMGUI_DIR}/misc/cpp)
 target_link_libraries(ImGui PRIVATE glfw Vulkan::Headers)
 
+# DXC
 find_library(dxcompiler_LIBRARY NAMES dxcompiler dxcompilerd HINTS "$ENV{VULKAN_SDK}/lib" REQUIRED)
 
 add_executable(VulkanRenderEngine src/main.cpp ${IMGUI_SOURCES}
-        src/misc/vulkan_loader.cpp)
+        # Vulkan dynamic loader without using Vulkan-Hpp C++20 module
+        src/misc/vulkan_loader.cpp
+        src/misc/vma_usage.cpp)
+
 # Compile modules
 target_sources(VulkanRenderEngine PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
         src/core/platform.cppm src/core/input.cppm src/core/hlsl_compiler.cppm
         src/ecs.cppm
         src/resource/resource.cppm
-        src/render/vulkan_resource_service.cppm src/render/render_engine.cppm src/render/camera.cppm
+        src/render/rhi/vulkan_resource_service.cppm src/render/render_engine.cppm src/render/camera.cppm
         src/render/render_locator.cppm src/render/render_types.cppm src/render/culling_system.cppm
+        src/render/pipeline_manager.cppm src/render/rhi/vulkan_instance.cppm
 )
 
 target_compile_definitions(VulkanRenderEngine PRIVATE USE_CPP20_MODULES=1)
 target_include_directories(VulkanRenderEngine PRIVATE BEFORE ${Vulkan_INCLUDE_DIR})
 # If I specify the overall vulkan sdk include folder, it overrides the fetched headers on my Mac and I have no idea why
 target_include_directories(VulkanRenderEngine PRIVATE AFTER $ENV{VULKAN_SDK}/Include/dxc)
+# VMA
+target_include_directories(VulkanRenderEngine PRIVATE AFTER $ENV{VULKAN_SDK}/Include/vma)
 
 target_link_libraries(VulkanRenderEngine PRIVATE
         Vulkan-HppModule glfw glm-module stb::stb tinyobjloader-module ImGui
