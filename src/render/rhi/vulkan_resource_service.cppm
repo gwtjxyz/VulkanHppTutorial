@@ -12,11 +12,13 @@ export module vulkan_resource_service;
 #ifndef DISABLE_IMPORT_STD
 import std;
 #endif
-import platform;
 
 #if !(defined(__INTELLISENSE__) || !defined(USE_CPP20_MODULES) || defined(DISABLE_VULKAN_MODULE))
 import vulkan;
 #endif
+
+import platform;
+import vulkan_instance;
 
 using std::uint32_t;
 using std::int32_t;
@@ -59,7 +61,14 @@ export class VulkanResourceService {
 public:
     VulkanResourceService() {}
 
-    VulkanImageData createTexture(StbImageWrapper & textureImage) {
+    VulkanImageData createCombinedImageSamplerTexture(const StbImageWrapper & textureImage) const {
+        VulkanImageData imageData = createSampledImageTexture(textureImage);
+        imageData.sampler = createTextureSampler();
+
+        return imageData;
+    }
+
+    VulkanImageData createSampledImageTexture(const StbImageWrapper & textureImage) const {
         VulkanImageData imageData {};
 
         createTextureImage(textureImage, imageData);
@@ -70,9 +79,33 @@ public:
             vk::ImageAspectFlagBits::eColor,
             imageData.mipLevels
         );
-        imageData.sampler = createTextureSampler();
 
         return imageData;
+    }
+
+    vk::Sampler createTextureSampler() const {
+        vk::PhysicalDeviceProperties properties = m_Instance->getPhysicalDeviceProperties();
+        // https://docs.vulkan.org/tutorial/latest/06_Texture_mapping/01_Image_view_and_sampler.html#_samplers
+        // for details on what parameters do what ^^
+        vk::SamplerCreateInfo samplerInfo = {
+            .magFilter = vk::Filter::eLinear,
+            .minFilter = vk::Filter::eLinear,
+            .mipmapMode = vk::SamplerMipmapMode::eLinear,
+            .addressModeU = vk::SamplerAddressMode::eRepeat,
+            .addressModeV = vk::SamplerAddressMode::eRepeat,
+            .addressModeW = vk::SamplerAddressMode::eRepeat,
+            .mipLodBias = 0.0f,
+            .anisotropyEnable = vk::True,
+            .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+            .compareEnable = vk::False,
+            .compareOp = vk::CompareOp::eAlways,
+            .minLod = 0.0f,
+            .maxLod = vk::LodClampNone,
+            .borderColor = vk::BorderColor::eIntOpaqueBlack,
+            .unnormalizedCoordinates = vk::False
+        };
+
+        return m_Instance->getDevice().createSampler(samplerInfo);
     }
 
     template <typename T>
@@ -90,9 +123,9 @@ public:
             stagingBufferMemory
         );
 
-        void * stagingData = m_Device.mapMemory(stagingBufferMemory, 0, bufferSize);
+        void * stagingData = m_Instance->getDevice().mapMemory(stagingBufferMemory, 0, bufferSize);
         memcpy(stagingData, data.data(), bufferSize);
-        m_Device.unmapMemory(stagingBufferMemory);
+        m_Instance->getDevice().unmapMemory(stagingBufferMemory);
 
         createBuffer(
             bufferSize,
@@ -103,13 +136,13 @@ public:
         );
         copyBuffer(stagingBuffer, bufferData.buffer, bufferSize);
 
-        m_Device.freeMemory(stagingBufferMemory);
-        m_Device.destroyBuffer(stagingBuffer);
+        m_Instance->getDevice().freeMemory(stagingBufferMemory);
+        m_Instance->getDevice().destroyBuffer(stagingBuffer);
 
         return bufferData;
     }
 
-    std::vector<VulkanShaderBufferData> createShaderBuffers(vk::DeviceSize bufferSize, int maxFramesInFlight) {
+    std::vector<VulkanShaderBufferData> createShaderBuffers(const vk::DeviceSize bufferSize, const int maxFramesInFlight) const {
         std::vector<VulkanShaderBufferData> shaderBufferData {};
 
         for (size_t i = 0; i < maxFramesInFlight; ++i) {
@@ -126,13 +159,13 @@ public:
             vk::BufferDeviceAddressInfo deviceAddressInfo = {
                 .buffer = buffer
             };
-            vk::DeviceAddress bufferDeviceAddress = m_Device.getBufferAddress(deviceAddressInfo);
+            vk::DeviceAddress bufferDeviceAddress = m_Instance->getDevice().getBufferAddress(deviceAddressInfo);
 
             shaderBufferData.emplace_back(
                 VulkanShaderBufferData {
                     buffer,
                     bufferMemory,
-                    m_Device.mapMemory(bufferMemory, 0, bufferSize),
+                    m_Instance->getDevice().mapMemory(bufferMemory, 0, bufferSize),
                     bufferDeviceAddress
                 }
             );
@@ -159,9 +192,9 @@ public:
             stagingBufferMemory
         );
 
-        void * stagingData = m_Device.mapMemory(stagingBufferMemory, 0, bufferSize);
+        void * stagingData = m_Instance->getDevice().mapMemory(stagingBufferMemory, 0, bufferSize);
         memcpy(stagingData, data.data(), bufferSize);
-        m_Device.unmapMemory(stagingBufferMemory);
+        m_Instance->getDevice().unmapMemory(stagingBufferMemory);
 
         for (size_t i = 0; i < maxFramesInFlight; ++i) {
             vk::Buffer computeBuffer;
@@ -179,7 +212,7 @@ public:
             vk::BufferDeviceAddressInfo deviceAddressInfo = {
                 .buffer = computeBuffer
             };
-            vk::DeviceAddress bufferDeviceAddress = m_Device.getBufferAddress(deviceAddressInfo);
+            vk::DeviceAddress bufferDeviceAddress = m_Instance->getDevice().getBufferAddress(deviceAddressInfo);
 
             computeBufferData.emplace_back(
                 VulkanComputeBufferData {
@@ -190,8 +223,8 @@ public:
             );
         }
 
-        m_Device.freeMemory(stagingBufferMemory);
-        m_Device.destroyBuffer(stagingBuffer);
+        m_Instance->getDevice().freeMemory(stagingBufferMemory);
+        m_Instance->getDevice().destroyBuffer(stagingBuffer);
 
         return computeBufferData;
     }
@@ -204,7 +237,7 @@ public:
         vk::MemoryPropertyFlags memoryProperties,
         const uint32_t mipLevels,
         vk::ImageAspectFlags aspectFlags
-    ) {
+    ) const {
         VulkanImageData resources {};
         resources.mipLevels = mipLevels;
 
@@ -230,7 +263,7 @@ public:
         return resources;
     }
 
-    VulkanImageData createColorResources(const vk::Format colorFormat, const vk::Extent2D swapChainExtent, const vk::SampleCountFlagBits msaaSamples) {
+    VulkanImageData createColorResources(const vk::Format colorFormat, const vk::Extent2D swapChainExtent, const vk::SampleCountFlagBits msaaSamples) const {
         return createGenericResources(
             colorFormat,
             swapChainExtent,
@@ -242,7 +275,7 @@ public:
         );
     }
 
-    VulkanImageData createDepthResources(const vk::Format depthFormat, const vk::Extent2D swapChainExtent, const vk::SampleCountFlagBits msaaSamples) {
+    VulkanImageData createDepthResources(const vk::Format depthFormat, const vk::Extent2D swapChainExtent, const vk::SampleCountFlagBits msaaSamples) const {
         return createGenericResources(
             depthFormat,
             swapChainExtent,
@@ -255,23 +288,51 @@ public:
     }
 
     void freeResources(vk::Image & image, vk::DeviceMemory & deviceMemory, vk::ImageView & imageView, vk::Sampler & sampler) const {
-        m_Device.destroySampler(sampler);
-        sampler = nullptr;
+        if (sampler != nullptr) {
+            freeResources(sampler);
+        }
 
         freeResources(image, deviceMemory, imageView);
     }
 
     void freeResources(vk::Image & image, vk::DeviceMemory & deviceMemory, vk::ImageView & imageView) const {
-        m_Device.destroyImageView(imageView);
-        m_Device.destroyImage(image);
-        m_Device.freeMemory(deviceMemory);
+        m_Instance->getDevice().destroyImageView(imageView);
+        m_Instance->getDevice().destroyImage(image);
+        m_Instance->getDevice().freeMemory(deviceMemory);
 
         image = nullptr;
         deviceMemory = nullptr;
         imageView = nullptr;
     }
 
-    vk::Format findDepthFormat() {
+    void freeResources(vk::Sampler & sampler) const {
+        m_Instance->getDevice().destroySampler(sampler);
+        sampler = nullptr;
+    }
+
+    void freeResources(vk::ImageView & imageView) const {
+        m_Instance->getDevice().destroyImageView(imageView);
+        imageView = nullptr;
+    }
+
+    void freeResources(vk::Buffer & buffer, vk::DeviceMemory & bufferMemory) const {
+        m_Instance->getDevice().freeMemory(bufferMemory);
+        m_Instance->getDevice().destroyBuffer(buffer);
+
+        buffer = nullptr;
+        bufferMemory = nullptr;
+    }
+
+    void freeResourcesAndUnmapMemory(vk::Buffer & buffer, vk::DeviceMemory & bufferMemory) const {
+        m_Instance->getDevice().unmapMemory(bufferMemory);
+        m_Instance->getDevice().freeMemory(bufferMemory);
+        m_Instance->getDevice().destroyBuffer(buffer);
+
+        buffer = nullptr;
+        bufferMemory = nullptr;
+    }
+
+    vk::Format findDepthFormat() const {
         return findSupportedFormat(
             { vk::Format::eD32Sfloat, vk::Format::eD32SfloatS8Uint, vk::Format::eD24UnormS8Uint },
             vk::ImageTiling::eOptimal,
@@ -355,29 +416,31 @@ public:
             .pCode = reinterpret_cast<const uint32_t *>(code.data())
         };
 
-        vk::ShaderModule shaderModule = m_Device.createShaderModule(createInfo);
+        vk::ShaderModule shaderModule = m_Instance->getDevice().createShaderModule(createInfo);
         return shaderModule;
     }
 
-    [[nodiscard]] vk::Device getDevice() const { return m_Device; }
-    [[nodiscard]] vk::PhysicalDevice getPhysicalDevice() const { return m_PhysicalDevice; }
-    [[nodiscard]] vk::Queue getGraphicsQueue() const { return m_GraphicsQueue; }
-    [[nodiscard]] vk::CommandPool getCommandPool() const { return m_CommandPool; }
-
-    void setDevice(const vk::raii::Device & device) {
-        m_Device = *device;
+    // This function manually allocates image view memory, meaning it will need to be manually deallocated later
+    [[nodiscard]]
+    vk::ImageView createImageView(
+        const vk::Image & image, const vk::Format format,
+        vk::ImageAspectFlags aspectFlags, uint32_t mipLevels
+    ) const {
+        vk::ImageViewCreateInfo viewInfo = {
+            .image = image,
+            .viewType = vk::ImageViewType::e2D,
+            .format = format,
+            .subresourceRange = { aspectFlags, 0, mipLevels, 0, 1 }
+        };
+        return m_Instance->getDevice().createImageView(viewInfo);
     }
 
-    void setPhysicalDevice(const vk::raii::PhysicalDevice & physicalDevice) {
-        m_PhysicalDevice = *physicalDevice;
+    void setVulkanInstance(VulkanInstance * instance) {
+        m_Instance = instance;
     }
 
-    void setGraphicsQueue(const vk::raii::Queue & queue) {
-        m_GraphicsQueue = *queue;
-    }
-
-    void setCommandPool(const vk::raii::CommandPool & commandPool) {
-        m_CommandPool = *commandPool;
+    VulkanInstance & getVulkanInstance() const {
+        return *m_Instance;
     }
 
 private:
@@ -386,13 +449,13 @@ private:
         const vk::ImageLayout oldLayout,
         const vk::ImageLayout newLayout,
         const uint32_t mipLevels = 1
-    ) {
+    ) const {
         vk::CommandBuffer commandBuffer = beginSingleTimeCommands();
         transitionImageLayout(commandBuffer, image, oldLayout, newLayout, mipLevels);
         endSingleTimeCommands(commandBuffer);
     }
 
-    void createTextureImage(const StbImageWrapper & textureImage, VulkanImageData & dstImageData) {
+    void createTextureImage(const StbImageWrapper & textureImage, VulkanImageData & dstImageData) const {
         // multiplying by 4 instead of # of channels because we create image with the format of RGBA
         vk::DeviceSize imageSize = textureImage.width * textureImage.height * 4;
 
@@ -411,9 +474,9 @@ private:
             stagingBufferMemory
         );
 
-        void * data = m_Device.mapMemory(stagingBufferMemory, 0, imageSize);
+        void * data = m_Instance->getDevice().mapMemory(stagingBufferMemory, 0, imageSize);
         memcpy(data, textureImage.pixels, imageSize);
-        m_Device.unmapMemory(stagingBufferMemory);
+        m_Instance->getDevice().unmapMemory(stagingBufferMemory);
 
         dstImageData.mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(textureImage.width, textureImage.height)))) + 1;
 
@@ -453,8 +516,8 @@ private:
         );
 
         // Cleanup
-        m_Device.freeMemory(stagingBufferMemory);
-        m_Device.destroyBuffer(stagingBuffer);
+        m_Instance->getDevice().freeMemory(stagingBufferMemory);
+        m_Instance->getDevice().destroyBuffer(stagingBuffer);
     }
 
     // This function manually allocates image memory, meaning it will need to be manually deallocated later
@@ -469,7 +532,7 @@ private:
         vk::MemoryPropertyFlags properties,
         vk::Image & image,
         vk::DeviceMemory & deviceMemory
-    ) {
+    ) const {
         vk::ImageCreateInfo imageInfo = {
             .imageType = vk::ImageType::e2D,
             .format = format,
@@ -481,24 +544,24 @@ private:
             .usage = usage,
             .sharingMode = vk::SharingMode::eExclusive
         };
-        image = m_Device.createImage(imageInfo);
+        image = m_Instance->getDevice().createImage(imageInfo);
 
-        vk::MemoryRequirements memRequirements = m_Device.getImageMemoryRequirements(image);
+        vk::MemoryRequirements memRequirements = m_Instance->getDevice().getImageMemoryRequirements(image);
         vk::MemoryAllocateInfo allocInfo = {
             .allocationSize = memRequirements.size,
             .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)
         };
-        deviceMemory = m_Device.allocateMemory(allocInfo);
-        m_Device.bindImageMemory(image, deviceMemory, 0);
+        deviceMemory = m_Instance->getDevice().allocateMemory(allocInfo);
+        m_Instance->getDevice().bindImageMemory(image, deviceMemory, 0);
     }
 
-    vk::CommandBuffer beginSingleTimeCommands() {
+    vk::CommandBuffer beginSingleTimeCommands() const {
         vk::CommandBufferAllocateInfo allocInfo = {
-            .commandPool = m_CommandPool,
+            .commandPool = m_Instance->getCommandPool(),
             .level = vk::CommandBufferLevel::ePrimary,
             .commandBufferCount = 1
         };
-        vk::CommandBuffer commandBuffer = std::move(m_Device.allocateCommandBuffers(allocInfo).front());
+        vk::CommandBuffer commandBuffer = std::move(m_Instance->getDevice().allocateCommandBuffers(allocInfo).front());
 
         vk::CommandBufferBeginInfo beginInfo { .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit };
         commandBuffer.begin(beginInfo);
@@ -506,19 +569,19 @@ private:
         return commandBuffer;
     }
 
-    void endSingleTimeCommands(vk::CommandBuffer & commandBuffer) {
+    void endSingleTimeCommands(vk::CommandBuffer & commandBuffer) const {
         commandBuffer.end();
 
         vk::SubmitInfo submitInfo { .commandBufferCount = 1, .pCommandBuffers = &commandBuffer };
-        m_GraphicsQueue.submit(submitInfo, nullptr);
+        m_Instance->getGraphicsQueue().submit(submitInfo, nullptr);
         // using a fence instead of waitIdle() would allow us to schedule multiple transfer simultaneously and
         // wait for all of them to complete instead of executing one at a time. ( = likely better optimization)
-        m_GraphicsQueue.waitIdle();
+        m_Instance->getGraphicsQueue().waitIdle();
 
-        m_Device.freeCommandBuffers(m_CommandPool, 1, &commandBuffer);
+        m_Instance->getDevice().freeCommandBuffers(m_Instance->getCommandPool(), 1, &commandBuffer);
     }
 
-    void copyBuffer(vk::Buffer & srcBuffer, vk::Buffer & dstBuffer, vk::DeviceSize size) {
+    void copyBuffer(const vk::Buffer & srcBuffer, const vk::Buffer & dstBuffer, const vk::DeviceSize size) const {
         auto commandCopyBuffer = beginSingleTimeCommands();
         commandCopyBuffer.copyBuffer(srcBuffer, dstBuffer, vk::BufferCopy(0, 0, size));
         endSingleTimeCommands(commandCopyBuffer);
@@ -528,14 +591,14 @@ private:
     void createBuffer(
         vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties,
         vk::Buffer & buffer, vk::DeviceMemory & bufferMemory
-    ) {
+    ) const {
         vk::BufferCreateInfo bufferInfo = {
             .size = size,
             .usage = usage,
             .sharingMode = vk::SharingMode::eExclusive
         };
-        buffer = m_Device.createBuffer(bufferInfo);
-        vk::MemoryRequirements memRequirements = m_Device.getBufferMemoryRequirements(buffer);
+        buffer = m_Instance->getDevice().createBuffer(bufferInfo);
+        vk::MemoryRequirements memRequirements = m_Instance->getDevice().getBufferMemoryRequirements(buffer);
         vk::MemoryAllocateInfo allocInfo = {
             .allocationSize = memRequirements.size,
             .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)
@@ -548,12 +611,12 @@ private:
             allocInfo.pNext = &allocFlagsInfo;
         }
 
-        bufferMemory = m_Device.allocateMemory(allocInfo);
-        m_Device.bindBufferMemory(buffer, bufferMemory, 0);
+        bufferMemory = m_Instance->getDevice().allocateMemory(allocInfo);
+        m_Instance->getDevice().bindBufferMemory(buffer, bufferMemory, 0);
     }
 
-    uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties) {
-        vk::PhysicalDeviceMemoryProperties memProperties = m_PhysicalDevice.getMemoryProperties();
+    uint32_t findMemoryType(const uint32_t typeFilter, const vk::MemoryPropertyFlags properties) const {
+        vk::PhysicalDeviceMemoryProperties memProperties = m_Instance->getPhysicalDevice().getMemoryProperties();
         // only concerning ourselves about memory types for now, not the heaps that memory comes from
         for (uint32_t i = 0; i < memProperties.memoryTypeCount; ++i) {
             if (typeFilter & (1 << i) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
@@ -564,7 +627,7 @@ private:
         throw std::runtime_error("Failed to find suitable memory type!");
     }
 
-    void copyBufferToImage(const vk::Buffer & buffer, vk::Image & image, uint32_t width, uint32_t height) {
+    void copyBufferToImage(const vk::Buffer & buffer, const vk::Image & image, const uint32_t width, const uint32_t height) const {
         vk::CommandBuffer commandBuffer = beginSingleTimeCommands();
 
         // TODO parametrize offsets
@@ -582,9 +645,9 @@ private:
     }
 
     // TODO: Try implementing software resizing and/or loading multiple mip levels from a single file
-    void generateMipmaps(vk::Image & image, vk::Format imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels) {
+    void generateMipmaps(const vk::Image & image, const vk::Format imageFormat, const int32_t texWidth, const int32_t texHeight, const uint32_t mipLevels) const {
         // Check if image format supports linear blit-ing
-        vk::FormatProperties formatProperties = m_PhysicalDevice.getFormatProperties(imageFormat);
+        vk::FormatProperties formatProperties = m_Instance->getPhysicalDevice().getFormatProperties(imageFormat);
         if (!(formatProperties.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImageFilterLinear)) {
             throw std::runtime_error("Texture image format does not support linear blitting!");
         }
@@ -670,49 +733,9 @@ private:
         endSingleTimeCommands(commandBuffer);
     }
 
-    // This function manually allocates image view memory, meaning it will need to be manually deallocated later
-    [[nodiscard]]
-    vk::ImageView createImageView(
-        const vk::Image & image, const vk::Format format,
-        vk::ImageAspectFlags aspectFlags, uint32_t mipLevels
-    ) const {
-        vk::ImageViewCreateInfo viewInfo = {
-            .image = image,
-            .viewType = vk::ImageViewType::e2D,
-            .format = format,
-            .subresourceRange = { aspectFlags, 0, mipLevels, 0, 1 }
-        };
-        return m_Device.createImageView(viewInfo);
-    }
-
-    vk::Sampler createTextureSampler() {
-        vk::PhysicalDeviceProperties properties = m_PhysicalDevice.getProperties();
-        // https://docs.vulkan.org/tutorial/latest/06_Texture_mapping/01_Image_view_and_sampler.html#_samplers
-        // for details on what parameters do what ^^
-        vk::SamplerCreateInfo samplerInfo = {
-            .magFilter = vk::Filter::eLinear,
-            .minFilter = vk::Filter::eLinear,
-            .mipmapMode = vk::SamplerMipmapMode::eLinear,
-            .addressModeU = vk::SamplerAddressMode::eRepeat,
-            .addressModeV = vk::SamplerAddressMode::eRepeat,
-            .addressModeW = vk::SamplerAddressMode::eRepeat,
-            .mipLodBias = 0.0f,
-            .anisotropyEnable = vk::True,
-            .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
-            .compareEnable = vk::False,
-            .compareOp = vk::CompareOp::eAlways,
-            .minLod = 0.0f,
-            .maxLod = vk::LodClampNone,
-            .borderColor = vk::BorderColor::eIntOpaqueBlack,
-            .unnormalizedCoordinates = vk::False
-        };
-
-        return m_Device.createSampler(samplerInfo);
-    }
-
     vk::Format findSupportedFormat(const std::vector<vk::Format> & candidates, vk::ImageTiling tiling, vk::FormatFeatureFlags features) const {
         for (const auto format : candidates) {
-            vk::FormatProperties props = m_PhysicalDevice.getFormatProperties(format);
+            vk::FormatProperties props = m_Instance->getPhysicalDevice().getFormatProperties(format);
             if (tiling == vk::ImageTiling::eLinear && (props.linearTilingFeatures & features) == features) {
                 return format;
             }
@@ -725,12 +748,5 @@ private:
     }
 
 private:
-    // Storing hpp-wrapped Vulkan handles instead of RAII objects so that we can work with them through here
-    // but still clean them up from elsewhere and not worry about deinitialization order
-    // This adds more work when it comes to memory cleanup but that's fine
-
-    vk::Device m_Device = nullptr;
-    vk::PhysicalDevice m_PhysicalDevice = nullptr;
-    vk::Queue m_GraphicsQueue = nullptr;
-    vk::CommandPool m_CommandPool = nullptr;
+    VulkanInstance * m_Instance = nullptr;
 };

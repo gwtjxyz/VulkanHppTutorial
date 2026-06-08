@@ -233,6 +233,7 @@ public:
         return m_ImageView;
     }
 
+    // TODO some kind of global sampler?
     [[nodiscard]] vk::Sampler getSampler() const {
         return m_Sampler;
     }
@@ -269,13 +270,12 @@ private:
     }
 
     void createVulkanImage(StbImageWrapper & data) {
-        const auto imageData = Locator::getVulkanResourceService()->createTexture(data);
+        const auto imageData = Locator::getVulkanResourceService()->createSampledImageTexture(data);
 
         m_Image = imageData.image;
         m_DeviceMemory = imageData.imageMemory;
         m_Offset = 0; // TODO: change when we start supporting different offsets
         m_ImageView = imageData.imageView;
-        m_Sampler = imageData.sampler;
     }
 
 private:
@@ -338,15 +338,9 @@ protected:
     void doUnload() override {
         // Only proceed with cleanup if resources are currently loaded
         if (isLoaded()) {
-            vk::Device device = Locator::getVulkanResourceService()->getDevice();
-
-            // Clean up index resources first to maintain clear dependency order
-            device.destroyBuffer(m_IndexBuffer);
-            device.freeMemory(m_IndexBufferMemory);
-
-            // Vertex resources cleaned up second
-            device.destroyBuffer(m_VertexBuffer);
-            device.freeMemory(m_VertexBufferMemory);
+            // Clean up index buffers first, vertex buffers second to maintain clear dependency order
+            Locator::getVulkanResourceService()->freeResources(m_IndexBuffer, m_IndexBufferMemory);
+            Locator::getVulkanResourceService()->freeResources(m_VertexBuffer, m_VertexBufferMemory);
         }
     }
 private:
@@ -433,63 +427,6 @@ private:
     vk::DeviceMemory m_IndexBufferMemory = nullptr;         // GPU memory backing the index buffer
     vk::DeviceSize m_IndexBufferOffset = 0;                 // Offset within the memory allocation for index buffer
     uint32_t m_IndexCount = 0;                              // Number of indices in this mesh (typically 3 per triangle)
-};
-
-// Shader resource
-// TODO finish and use (not fully ready for use yet - slang-compiled shaders with multiple entry points won't work)
-export class Shader : public Resource {
-public:
-    Shader(const std::string & id, vk::ShaderStageFlagBits shaderStage)
-        : Resource(id), m_Stage(shaderStage) {}
-
-    ~Shader() override {
-        unload();
-    }
-
-    [[nodiscard]] vk::ShaderModule getShaderModule() const {
-        return m_ShaderModule;
-    }
-
-    [[nodiscard]] vk::ShaderStageFlagBits getStage() const {
-        return m_Stage;
-    }
-protected:
-    bool doLoad() override {
-        // Determine file extension based on shader stage
-        std::string extension;
-        switch (m_Stage) {
-            case vk::ShaderStageFlagBits::eVertex: extension = ".vert"; break;
-            case vk::ShaderStageFlagBits::eFragment: extension = ".frag"; break;
-            case vk::ShaderStageFlagBits::eCompute: extension = ".comp"; break;
-            // case vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment: extension = ""; break;
-            default: return false;
-        }
-
-        // Load shader from file
-        std::string filePath = "shaders/" + getId() + extension + ".spv";
-
-        // Read shader code
-        std::vector<char> shaderCode = readFile(filePath);
-
-        createShaderModule(shaderCode);
-
-        return true;
-    }
-
-    void doUnload() override {
-        if (isLoaded()) {
-            vk::Device device = Locator::getVulkanResourceService()->getDevice();
-
-            device.destroyShaderModule(m_ShaderModule);
-        }
-    }
-private:
-    void createShaderModule(const std::vector<char> & shaderCode) {
-        m_ShaderModule = Locator::getVulkanResourceService()->createShaderModule(shaderCode);
-    }
-private:
-    vk::ShaderModule m_ShaderModule = nullptr;
-    vk::ShaderStageFlagBits m_Stage{};
 };
 
 // TODO

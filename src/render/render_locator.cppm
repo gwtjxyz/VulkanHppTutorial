@@ -7,14 +7,14 @@ import vulkan_resource_service;
 export class Locator {
 public:
     static VulkanResourceService * getVulkanResourceService() {
-        return vulkanResourceService;
+        return m_VulkanResourceService;
     }
 
     static void provide(VulkanResourceService * service) {
-        vulkanResourceService = service;
+        m_VulkanResourceService = service;
     }
 private:
-    static VulkanResourceService * vulkanResourceService;
+    static VulkanResourceService * m_VulkanResourceService;
 };
 
-VulkanResourceService * Locator::vulkanResourceService = nullptr;
+VulkanResourceService * Locator::m_VulkanResourceService = nullptr;

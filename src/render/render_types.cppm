@@ -18,6 +18,7 @@ import vulkan;
 #endif
 
 using std::uint32_t;
+using std::int32_t;
 
 export struct Vertex {
     glm::vec4 pos;
@@ -57,8 +58,7 @@ export struct ShaderData {
     alignas(16) glm::mat4 view;
     alignas(16) glm::mat4 model;
     alignas(16) glm::vec4 lightPos { 0.0f, -10.0f, 10.0f, 0.0f };
-    uint32_t lightingEnabled = { 1 };
-    uint32_t textureIndex = { 0 };
+    alignas(16) uint32_t textureIndex = { 0 };
 };
 
 // Same data layout as Vertex struct so we can use the same shader for both, even though most of this data isn't used
@@ -92,6 +92,7 @@ export struct VertexPushConstants {
     vk::DeviceAddress shaderDataStartAddress;
     uint32_t shaderDataIndex;
     uint32_t particlesEnabled;
+    int32_t lightingMode;
 };
 
 export struct Plane {

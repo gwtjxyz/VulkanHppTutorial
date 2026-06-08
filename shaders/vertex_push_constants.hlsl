@@ -5,6 +5,7 @@ struct VertexPushConstants {
     uint64_t shaderDataStartAddress;
     uint shaderDataIndex;
     uint particlesEnabled;
+    int lightingMode;
 };
 
 [[vk::push_constant]] ConstantBuffer<VertexPushConstants> vertexConstants;
