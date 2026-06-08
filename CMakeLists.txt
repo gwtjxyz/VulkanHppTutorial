@@ -171,9 +171,9 @@ target_sources(VulkanRenderEngine PUBLIC
         src/core/platform.cppm src/core/input.cppm src/core/hlsl_compiler.cppm
         src/ecs.cppm
         src/resource/resource.cppm
-        src/render/rhi/vulkan_resource_service.cppm src/render/render_engine.cppm src/render/camera.cppm
+        src/render/render_engine.cppm src/render/camera.cppm
         src/render/render_locator.cppm src/render/render_types.cppm src/render/culling_system.cppm
-        src/render/pipeline_manager.cppm src/render/rhi/vulkan_instance.cppm
+        src/render/rhi/vulkan_instance.cppm src/render/rhi/vulkan_resource_service.cppm
 )
 
 target_compile_definitions(VulkanRenderEngine PRIVATE USE_CPP20_MODULES=1)

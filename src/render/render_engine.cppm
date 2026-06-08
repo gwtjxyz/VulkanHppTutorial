@@ -39,19 +39,6 @@ import glm;
 import vulkan;
 #endif
 
-// CLion hack to fix ambiguous symbol errors
-// This doesn't actually do anything, but convinces CLion that there are no ambiguous symbols in the code
-// Otherwise the code compiles and runs with no issues, but the IDE complains regardless
-#ifdef __JETBRAINS_IDE__
-class DispatchLoaderHack {
-public:
-    static void init() {}
-    static void init(const vk::Instance & instance) { (void)instance; }
-};
-
-DispatchLoaderHack dispatchLoaderHack;
-#endif
-
 constexpr uint32_t WIDTH = 1280;
 constexpr uint32_t HEIGHT = 720;
 constexpr uint32_t PARTICLE_COUNT = 8192;
@@ -204,11 +191,14 @@ private:
 
         // Pipeline layout setup
         createDescriptorSetLayout();
-        createComputePipeline();
-        createGraphicsPipeline();
-        createPointGraphicsPipeline();
         createDescriptorPool();
         createDescriptorSets();
+        createGraphicsPipeline();
+
+        createComputePipeline();
+
+        createPointGraphicsPipeline();
+
         createCommandBuffers();
         createComputeCommandBuffers();
 
@@ -482,10 +472,27 @@ private:
         ImGui::Text("Controls: WASD to move, Space/Control to move up/down");
         ImGui::Text("Esc to show/hide mouse, Q to exit, R to reload shaders");
         ImGui::Spacing();
+
         if (ImGui::CollapsingHeader("Shader Controls")) {
+            const char * lightingModeLabel;
+            switch (m_LightingMode) {
+                case 0:
+                    lightingModeLabel = "Off";
+                    break;
+                case 1:
+                    lightingModeLabel = "Phong";
+                    break;
+                case 2:
+                    lightingModeLabel = "Gooch";
+                    break;
+                default:
+                    lightingModeLabel = "Unknown";
+                    break;
+            }
+            ImGui::SliderInt("Lighting mode", &m_LightingMode, 0, 2, lightingModeLabel);
+
             if (ImGui::BeginTable("ShaderControlCheckboxes", 2)) {
                 ImGui::TableNextColumn();
-                ImGui::Checkbox("Lighting enabled", &m_IsLightingEnabled);
                 ImGui::Checkbox("Model spin enabled", &m_IsModelSpinEnabled);
                 ImGui::TableNextColumn();
                 ImGui::Checkbox("Particles enabled", &m_ParticlesEnabled);
@@ -495,7 +502,7 @@ private:
             static float lightPosWidgetData[3] {
                 m_LightPosition.x, m_LightPosition.y, m_LightPosition.z
             };
-            if (!m_IsLightingEnabled) {
+            if (m_LightingMode == 0) {
                 ImGui::BeginDisabled();
             }
 
@@ -504,7 +511,7 @@ private:
             m_LightPosition.y = lightPosWidgetData[1];
             m_LightPosition.z = lightPosWidgetData[2];
 
-            if (!m_IsLightingEnabled) {
+            if (m_LightingMode == 0) {
                 ImGui::EndDisabled();
             }
         }
@@ -546,7 +553,6 @@ private:
         shaderData[0].projection = m_Camera.getProjectionMatrix();
         shaderData[0].projection[1][1] *= -1; // Vulkan's Y coordinate is inverted compared to OpenGL's, which glm was designed for originally
         shaderData[0].lightPos = m_LightPosition;
-        shaderData[0].lightingEnabled = m_IsLightingEnabled;
         shaderData[0].textureIndex = 0;
 
         // Terrain
@@ -555,7 +561,6 @@ private:
         shaderData[1].projection = m_Camera.getProjectionMatrix();
         shaderData[1].projection[1][1] *= -1;
         shaderData[1].lightPos = m_LightPosition;
-        shaderData[1].lightingEnabled = m_IsLightingEnabled;
         shaderData[1].textureIndex = 1;
 
         memcpy(m_ShaderDataBuffers[m_FrameIndex].mappedMemory, &shaderData, sizeof(shaderData));
@@ -1267,6 +1272,7 @@ private:
             .shaderDataStartAddress = m_ComputeDataBuffers[m_FrameIndex].bufferDeviceAddress,
             .shaderDataIndex = 0,
             .particlesEnabled = m_ParticlesEnabled,
+            .lightingMode = m_LightingMode,
         };
 
         // Draw particles
@@ -1439,7 +1445,7 @@ private:
     uint32_t m_Fps = 0;
 
     // Dynamic shader data
-    bool m_IsLightingEnabled = true;
+    int32_t m_LightingMode = true;
     bool m_ParticlesEnabled = true;
     glm::vec4 m_LightPosition = { 0.0f, -10.0f, 10.0f, 0.0f };
 
